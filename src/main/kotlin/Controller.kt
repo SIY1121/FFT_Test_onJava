@@ -2,22 +2,16 @@ import javafx.event.ActionEvent
 import javafx.fxml.FXML
 import javafx.fxml.Initializable
 import javafx.scene.canvas.Canvas
-import javafx.scene.chart.LineChart
-import javafx.scene.chart.XYChart
 import javafx.scene.layout.AnchorPane
-import javafx.scene.paint.Color
+import org.bytedeco.javacpp.avcodec
 import org.bytedeco.javacv.FFmpegFrameGrabber
+import org.bytedeco.javacv.FFmpegFrameRecorder
 import org.bytedeco.javacv.FrameGrabber
 import org.jtransforms.fft.FloatFFT_1D
+import java.io.File
 import java.net.URL
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.*
-import javax.sound.sampled.AudioFormat
-import javax.sound.sampled.AudioSystem
-import javax.sound.sampled.DataLine
-import javax.sound.sampled.SourceDataLine
 
 class Controller : Initializable {
     @FXML
@@ -31,77 +25,143 @@ class Controller : Initializable {
     }
 
     fun onOpenClick(actionEvent: ActionEvent) {
-        val grabber = FFmpegFrameGrabber("C:\\Users\\sota\\OneDrive - 筑波大学\\StudioOneProjects\\2018-05-13 市川 創大\\Mixdown\\Mixdown(2).flac")
+        run(
+                "D:\\Music\\THE IDOLM@STER CINDERELLA GIRLS MASTER SEASONS AUTUMN!\\03. xwsxwzjtha.mp3",
+                "C:\\Users\\sota\\Downloads\\IMreverbs\\On a Star.wav"
+        )
+    }
+
+    private fun run(srcFile: String, irFile: String) {
+        try {
+            //インパルス応答を読み込み
+            val irSamples = loadIrSamples(irFile)
+            //前半半分にパディングを入れる
+            val irSamplesWithPadding = FloatArray(irSamples.size) + irSamples
+
+            //ソースファイルを開く
+            val grabber = FFmpegFrameGrabber(srcFile)
+            grabber.sampleMode = FrameGrabber.SampleMode.FLOAT
+            grabber.start()
+
+            val recorder = FFmpegFrameRecorder("out.aac", 2)
+            recorder.audioCodec = avcodec.AV_CODEC_ID_AAC
+            recorder.sampleRate = 44100
+            recorder.audioBitrate = 192_000
+            recorder.start()
+
+            //窓関数生成
+            val window = genHannWindow(irSamplesWithPadding.size)
+            val fft = FloatFFT_1D(irSamplesWithPadding.size.toLong())
+
+            //インパルスに窓関数適用
+//            for (i in 0 until irSamplesWithPadding.size)
+//                irSamplesWithPadding[i] *= window[i]
+
+            //インパルスをFFTにかける
+            fft.realForward(irSamplesWithPadding)
+
+            var prevSamples = FloatArray(irSamplesWithPadding.size / 2)
+            while (true) {
+                //新しいサンプルを読む
+                val samples = readSamples(grabber, irSamplesWithPadding.size / 2) ?: break
+
+                //過去の1ブロックと結合
+                val inputSamples = prevSamples + samples
+
+                //窓関数を適用
+//                for (i in 0 until inputSamples.size)
+//                    inputSamples[i] *= window[i]
+                //FFT実行
+                fft.realForward(inputSamples)
+
+                //インパルスとソースを周波数領域で乗算
+                val dst = multipleComplex(inputSamples, irSamplesWithPadding)
+                //逆FFT実行
+                fft.realInverse(dst, true)
+                //窓関数で戻す
+//                for (i in 0 until dst.size)
+//                    dst[i] /= window[i]
+//                println("max ${dst.max()} min ${dst.min()} ${window.min()}")
+                //前半半分を使用
+                val buf = FloatBuffer.allocate(dst.size / 2)
+                buf.put(dst, 0, dst.size / 2)
+                buf.position(0)
+                recorder.recordSamples(buf)
+
+                prevSamples = samples
+                println(grabber.timestamp.toDouble() / grabber.lengthInTime * 100)
+            }
+            grabber.stop()
+            recorder.stop()
+
+            println("done!")
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun loadIrSamples(irFile: String): FloatArray {
+        val grabber = FFmpegFrameGrabber(irFile)
         grabber.sampleMode = FrameGrabber.SampleMode.FLOAT
         grabber.start()
 
-        val cap = ((grabber.lengthInTime / 1000.0 / 1000.0) * grabber.sampleRate * grabber.audioChannels).toInt()
-
-        println("alloc $cap")
-        val buf = FloatBuffer.allocate(cap)
-        //grabber.timestamp = 1000L * 1000L
+        val samples = FloatArray(((grabber.lengthInTime / 1000_000.0) * grabber.sampleRate * grabber.audioChannels).toInt() + 1)
         var read = 0
-        while (read < cap) {
-            val b = grabber.grabSamples().samples[0] as FloatBuffer
-            if (b.capacity() > cap - read) break
-            buf.put(b)
 
-            read += b.capacity()
-            println(read)
+        while (true) {
+            val buf = grabber.grabSamples()?.samples?.get(0) as? FloatBuffer ?: break
+            buf.get(samples, read, buf.limit())
+            read += buf.limit()
         }
-        println(buf.capacity())
-        var array = FloatArray(buf.capacity())
-        buf.position(0)
-        buf.get(array)
-        val window = genHammingWindow(array.size)
-        array = array.mapIndexed { index, value -> value * window[index] }.toFloatArray()
-        FloatFFT_1D(array.size.toLong()).realForward(array)
-        println("done fft")
+        grabber.stop()
 
-
-
-        canvas.graphicsContext2D.stroke = Color.BLUE
-
-        for (i in 0 until array.size / 2) {
-            val x = canvas.width * i.toDouble() / (array.size / 2.0) * 20.0
-            val y = Math.sqrt(Math.pow(array[i].toDouble(), 2.0) + Math.pow(array[i].toDouble(), 2.0)) / 100.0
-            val hz = i * grabber.sampleRate / (array.size / 2.0)
-            canvas.graphicsContext2D.strokeLine(x, canvas.height - y, x, canvas.height)
-        }
-
-        FloatFFT_1D(array.size.toLong()).realInverse(array,true)
-        println("done rfft")
-
-        val audioFormat = AudioFormat((grabber.sampleRate.toFloat()), 16, 2, true, false)
-
-        val info = DataLine.Info(SourceDataLine::class.java, audioFormat)
-        val audioLine = AudioSystem.getLine(info) as SourceDataLine
-        audioLine.open(audioFormat)
-        audioLine.start()
-
-
-        val s = array.mapIndexed { index, value -> ((value / window[index])*Short.MAX_VALUE).toShort() }.toShortArray()
-        println("conv short")
-        val bb = ByteBuffer.allocate(s.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        println("alloc ${bb.limit()}")
-        bb.asShortBuffer().put(s)
-        println("put")
-        while(bb.remaining()>0){
-            val d = ByteArray(88200)
-            bb.get(d,0,Math.min(bb.remaining(),88200))
-
-            audioLine.write(d,0,d.size)
-        }
-        println("done")
-
-
+        return samples
     }
 
-    fun genHammingWindow(size: Int): FloatArray {
+    var tmpBuffer: FloatBuffer? = null
+    private fun readSamples(grabber: FFmpegFrameGrabber, size: Int): FloatArray? {
+        val result = FloatArray(size)
+        var read = 0
+        while (read < size) {
+            if (tmpBuffer == null || tmpBuffer?.remaining() == 0)
+                tmpBuffer = grabber.grabSamples()?.samples?.get(0) as? FloatBuffer ?: break
+
+            val toRead = Math.min(tmpBuffer?.remaining() ?: 0, size - read)
+            tmpBuffer?.get(result, read, toRead)
+            read += toRead
+        }
+        return if (read > 0) result else null
+    }
+
+    private fun multipleComplex(src1: FloatArray, src2: FloatArray): FloatArray {
+        if (src1.size != src2.size) throw Exception("長さの違う配列同士は乗算できません")
+
+        val result = FloatArray(src1.size)
+
+        for (i in 0 until result.size / 2) {
+            result[i] = src1[i] * src2[i] - src1[i + 1] * src2[i + 1]
+            result[i + 1] = src1[i] * src2[i + 1] + src2[i] * src1[i + 1]
+        }
+
+
+        return result
+    }
+
+    private fun genHammingWindow(size: Int): FloatArray {
         val res = FloatArray(size)
 
         for (i in 0 until size)
             res[i] = (0.54 - 0.46 * Math.cos(2 * Math.PI * (i / size.toDouble()))).toFloat()
+
+        return res
+    }
+
+    private fun genHannWindow(size: Int): FloatArray {
+        val res = FloatArray(size)
+
+        for (i in 0 until size)
+            res[i] = 0.5f - 0.5f * Math.cos(2f * Math.PI * (i.toDouble() / size)).toFloat()
 
         return res
     }
