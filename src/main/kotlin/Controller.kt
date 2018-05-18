@@ -2,7 +2,10 @@ import javafx.event.ActionEvent
 import javafx.fxml.FXML
 import javafx.fxml.Initializable
 import javafx.scene.canvas.Canvas
+import javafx.scene.control.Alert
+import javafx.scene.control.ButtonType
 import javafx.scene.layout.AnchorPane
+import javafx.scene.paint.Color
 import org.bytedeco.javacpp.avcodec
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.FFmpegFrameRecorder
@@ -26,8 +29,8 @@ class Controller : Initializable {
 
     fun onOpenClick(actionEvent: ActionEvent) {
         run(
-                "D:\\Music\\THE IDOLM@STER CINDERELLA GIRLS MASTER SEASONS AUTUMN!\\03. xwsxwzjtha.mp3",
-                "C:\\Users\\sota\\Downloads\\IMreverbs\\On a Star.wav"
+                "C:\\Users\\sota\\OneDrive - 筑波大学\\Music\\塩谷哲 - ACCORDING TO LA METEO.mp3",
+                "C:\\Users\\sota\\Downloads\\Samplicity M7 Main - 01 - Wave, 32 bit, 44.1 Khz, v1.1 (1)\\Samplicity M7 Main - 01 - Wave, 32 bit, 44.1 Khz, v1.1\\M7 - 3 Rooms 22 Small & Room\\3 Rooms 22 Small & Room  M-to-S.wav"
         )
     }
 
@@ -50,15 +53,21 @@ class Controller : Initializable {
             recorder.start()
 
             //窓関数生成
-            val window = genHannWindow(irSamplesWithPadding.size)
+            val window = genHammingWindow(irSamplesWithPadding.size)
             val fft = FloatFFT_1D(irSamplesWithPadding.size.toLong())
 
+            draw(irSamplesWithPadding, "ir")
+
             //インパルスに窓関数適用
-//            for (i in 0 until irSamplesWithPadding.size)
-//                irSamplesWithPadding[i] *= window[i]
+            for (i in 0 until irSamplesWithPadding.size)
+                irSamplesWithPadding[i] *= window[i]
+
+            draw(irSamplesWithPadding, "ir w")
 
             //インパルスをFFTにかける
             fft.realForward(irSamplesWithPadding)
+
+            drawSpect(irSamplesWithPadding, "ir fft")
 
             var prevSamples = FloatArray(irSamplesWithPadding.size / 2)
             while (true) {
@@ -68,25 +77,38 @@ class Controller : Initializable {
                 //過去の1ブロックと結合
                 val inputSamples = prevSamples + samples
 
+                draw(inputSamples, "input")
+
                 //窓関数を適用
-//                for (i in 0 until inputSamples.size)
-//                    inputSamples[i] *= window[i]
+                for (i in 0 until inputSamples.size)
+                    inputSamples[i] *= window[i]
+
+                draw(inputSamples, "input w")
+
                 //FFT実行
                 fft.realForward(inputSamples)
 
+                drawSpect(inputSamples, "input fft")
+
                 //インパルスとソースを周波数領域で乗算
                 val dst = multipleComplex(inputSamples, irSamplesWithPadding)
+                //val dst = inputSamples
                 //逆FFT実行
                 fft.realInverse(dst, true)
                 //窓関数で戻す
-//                for (i in 0 until dst.size)
-//                    dst[i] /= window[i]
-//                println("max ${dst.max()} min ${dst.min()} ${window.min()}")
+                for (i in 0 until dst.size)
+                    dst[i] /= window[i]
+                //println("max ${dst.max()} min ${dst.min()} ${window.min()}")
+
+                draw(dst, "dst")
+
                 //前半半分を使用
                 val buf = FloatBuffer.allocate(dst.size / 2)
                 buf.put(dst, 0, dst.size / 2)
                 buf.position(0)
                 recorder.recordSamples(buf)
+
+
 
                 prevSamples = samples
                 println(grabber.timestamp.toDouble() / grabber.lengthInTime * 100)
@@ -140,8 +162,8 @@ class Controller : Initializable {
         val result = FloatArray(src1.size)
 
         for (i in 0 until result.size / 2) {
-            result[i] = src1[i] * src2[i] - src1[i + 1] * src2[i + 1]
-            result[i + 1] = src1[i] * src2[i + 1] + src2[i] * src1[i + 1]
+            result[i * 2] = src1[i * 2] * src2[i * 2] - src1[i * 2 + 1] * src2[i * 2 + 1]
+            result[i * 2 + 1] = src1[i * 2] * src2[i * 2 + 1] + src2[i * 2] * src1[i * 2 + 1]
         }
 
 
@@ -164,5 +186,38 @@ class Controller : Initializable {
             res[i] = 0.5f - 0.5f * Math.cos(2f * Math.PI * (i.toDouble() / size)).toFloat()
 
         return res
+    }
+
+    private fun draw(data: FloatArray, msg: String) {
+        val g = canvas.graphicsContext2D
+        g.clearRect(0.0, 0.0, canvas.width, canvas.height)
+        g.stroke = Color.RED
+        g.lineWidth = 1.0
+        for (i in 0 until data.size) {
+            val x = i.toDouble() / data.size * canvas.width
+            val y = (1f - data[i]) * canvas.height * 0.5 + canvas.height / 2
+            g.strokeLine(x, y, x, canvas.height)
+        }
+
+        g.strokeLine(0.0, canvas.height / 2, canvas.width, canvas.height / 2)
+
+        Alert(Alert.AlertType.NONE, msg, ButtonType.OK).showAndWait()
+    }
+
+    private fun drawSpect(data: FloatArray, msg: String) {
+        val g = canvas.graphicsContext2D
+        g.clearRect(0.0, 0.0, canvas.width, canvas.height)
+        g.stroke = Color.RED
+        g.lineWidth = 1.0
+        val max = data.max() ?: 0f
+        for (i in 0 until data.size / 2) {
+            val x = i.toDouble() / data.size * canvas.width
+            val y =(1f -  Math.sqrt(Math.pow(data[i].toDouble(), 2.0) + Math.pow(data[i + 1].toDouble(), 2.0)) / max) * canvas.height
+            g.strokeLine(x, y, x, canvas.height)
+        }
+
+        g.strokeLine(0.0, canvas.height / 2, canvas.width, canvas.height / 2)
+
+        Alert(Alert.AlertType.NONE, msg, ButtonType.OK).showAndWait()
     }
 }
